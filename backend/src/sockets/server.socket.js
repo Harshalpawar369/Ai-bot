@@ -118,10 +118,10 @@ function initSocketServer(httpServer) {
           },
         });
 
-        console.log("✅ Cycle complete: Message saved, AI responded, and memories stored.");
+        console.log("Cycle complete: Message saved, AI responded, and memories stored.");
 
       } catch (error) {
-        console.error("❌ Error in ai-message handler:", error);
+        console.error("Error in ai-message handler:", error);
         socket.emit("error", "Something went wrong processing your message.");
       }
     });
