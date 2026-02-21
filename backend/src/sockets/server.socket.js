@@ -4,7 +4,7 @@ const jwt = require("jsonwebtoken");
 const userModel = require("../models/user.model.js");
 const aiService = require("../services/ai.service.js");
 const messageModel = require("../models/message.model.js");
-const { createMemory,queryMemory } = require("../services/vector.server.js");
+const { createMemory, queryMemory } = require("../services/vector.server.js");
 
 function initSocketServer(httpServer) {
   const io = new Server(httpServer, {});
@@ -35,69 +35,95 @@ function initSocketServer(httpServer) {
   io.on("connection", (socket) => {
     console.log("a user connected", socket.id);
 
-    
+   socket.on("ai-message", async (messagePayload) => {
+      try {
+        let parsedData = typeof messagePayload === "string" 
+          ? JSON.parse(messagePayload) 
+          : messagePayload;
 
-    socket.on("ai-message", async (messagePayload) => {
+        const chatId = parsedData.chat;
+        const userMessage = parsedData.message;
 
+        const [savedUserMessage, userVectors] = await Promise.all([
+          messageModel.create({
+            chat: chatId,
+            user: socket.user._id,
+            content: userMessage,
+            role: "user",
+          }),
+          aiService.generateEmbedding(userMessage),
+        ]);
 
-      let parsedData;
-      if (typeof messagePayload === "string") {
-        parsedData = JSON.parse(messagePayload);
-      } else {
-        parsedData = messagePayload;
-      }
-
-      const chatId = parsedData.chat;
-      const userMessage = parsedData.message;
-
-      const [message, vectors] = await Promise.all([
-        messageModel.create({
-          chat: messagePayload.chat,
-          user: socket.user._id,
-          content: userMessage,
-          role: "user",
-        }),
-        aiService.generateEmbedding(userMessage),
-      ]);
-
-     
-
-  
-      await createMemory({
-          vectors: vectors,
-          messageId: message._id, 
-          metadata: { 
-            chatId: chatId.toString(), 
+        await createMemory({
+          vectors: userVectors,
+          messageId: savedUserMessage._id,
+          metadata: {
+            chatId: chatId.toString(),
             userId: socket.user._id.toString(),
+            text: userMessage, 
             role: "user"
-          }
+          },
         });
- 
+
+        const [memory, chatHistory] = await Promise.all([
+          queryMemory({
+            queryVector: userVectors,
+            limit: 3,
+            metadata: {
+              userId: socket.user._id.toString(), 
+            },
+          }),
+          messageModel.find({ chat: chatId }).sort({ createdAt: -1 }).limit(20).lean(),
+        ]);
+
+        const sortedHistory = chatHistory.reverse();
+
+        const stm = sortedHistory.map((item) => ({
+          role: item.role,
+          parts: [{ text: item.content }],
+        }));
+
+        const ltm = [
+          {
+            role: "user",
+            parts: [{
+              text: `These are some previous messages from the chat, use them to generate a response: \n${memory.map((item) => item.metadata.text).join("\n")}`
+            }],
+          },
+        ];
 
 
+        console.log("Generating AI response...");
+        const aiResponseText = await aiService.generateResponse([...ltm, ...stm]);
 
+        const savedAiMessage = await messageModel.create({
+          chat: chatId,
+          user: socket.user._id,
+          content: aiResponseText,
+          role: "model",
+        });
 
-      const chatHistory = await messageModel.find({
-        chat: messagePayload.chat,
-      });
-      // console.log("chat history", chatHistory.map(item =>{
-      //     return {
-      //         role: item.role,
-      //         parts: [{text: item.content}]
-      //     }
-      // }));
+        socket.emit("response", aiResponseText);
 
-      console.log("message payload", messagePayload);
+        const responseVectors = await aiService.generateEmbedding(aiResponseText);
 
-      const response = await aiService.generateResponse(userMessage);
+        await createMemory({
+          vectors: responseVectors, 
+          messageId: savedAiMessage._id, 
+          metadata: {
+            chatId: chatId.toString(),
+            userId: socket.user._id.toString(),
+            text: aiResponseText,
+            role: "model"
+          },
+        });
 
-      await messageModel.create({
-        chat: messagePayload.chat,
-        user: socket.user._id,
-        content: response,
-        role: "model",
-      });
-      socket.emit("response", response);
+        console.log("✅ Cycle complete: Message saved, AI responded, and memories stored.");
+
+      } catch (error) {
+        console.error("❌ Error in ai-message handler:", error);
+        socket.emit("error", "Something went wrong processing your message.");
+      }
     });
 
     socket.on("disconnect", (socket) => {
